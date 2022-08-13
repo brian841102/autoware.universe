@@ -15,9 +15,9 @@
 #ifndef BEHAVIOR_PATH_PLANNER__SCENE_MODULE__AVOIDANCE__AVOIDANCE_MODULE_HPP_
 #define BEHAVIOR_PATH_PLANNER__SCENE_MODULE__AVOIDANCE__AVOIDANCE_MODULE_HPP_
 
-#include "behavior_path_planner/path_shifter/path_shifter.hpp"
 #include "behavior_path_planner/scene_module/avoidance/avoidance_module_data.hpp"
 #include "behavior_path_planner/scene_module/scene_module_interface.hpp"
+#include "behavior_path_planner/scene_module/utils/path_shifter.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -39,6 +39,8 @@ namespace behavior_path_planner
 {
 class AvoidanceModule : public SceneModuleInterface
 {
+  using RegisteredShiftPointArray = std::vector<std::pair<UUID, Pose>>;
+
 public:
   AvoidanceModule(
     const std::string & name, rclcpp::Node & node, const AvoidanceParameters & parameters);
@@ -59,7 +61,7 @@ public:
     rtc_interface_right_.publishCooperateStatus(clock_->now());
   }
 
-  bool isActivated() const override
+  bool isActivated() override
   {
     if (rtc_interface_left_.isRegistered(uuid_left_)) {
       return rtc_interface_left_.isActivated(uuid_left_);
@@ -81,10 +83,13 @@ private:
 
   RTCInterface rtc_interface_left_;
   RTCInterface rtc_interface_right_;
+
+  RegisteredShiftPointArray left_shift_array_;
+  RegisteredShiftPointArray right_shift_array_;
   UUID uuid_left_;
   UUID uuid_right_;
 
-  void updateRTCStatus(const CandidateOutput & candidate)
+  void updateCandidateRTCStatus(const CandidateOutput & candidate)
   {
     if (candidate.lateral_shift > 0.0) {
       rtc_interface_left_.updateCooperateStatus(
@@ -101,10 +106,41 @@ private:
       getLogger(), "Direction is UNKNOWN, distance = " << candidate.distance_to_path_change);
   }
 
+  void updateRegisteredRTCStatus(const PathWithLaneId & path)
+  {
+    const Point ego_position = planner_data_->self_pose->pose.position;
+
+    for (const auto & left_shift : left_shift_array_) {
+      const double distance =
+        motion_utils::calcSignedArcLength(path.points, ego_position, left_shift.second.position);
+      rtc_interface_left_.updateCooperateStatus(left_shift.first, true, distance, clock_->now());
+    }
+
+    for (const auto & right_shift : right_shift_array_) {
+      const double distance =
+        motion_utils::calcSignedArcLength(path.points, ego_position, right_shift.second.position);
+      rtc_interface_right_.updateCooperateStatus(right_shift.first, true, distance, clock_->now());
+    }
+  }
+
   void removeRTCStatus() override
   {
     rtc_interface_left_.clearCooperateStatus();
     rtc_interface_right_.clearCooperateStatus();
+  }
+
+  void removePreviousRTCStatusLeft()
+  {
+    if (rtc_interface_left_.isRegistered(uuid_left_)) {
+      rtc_interface_left_.removeCooperateStatus(uuid_left_);
+    }
+  }
+
+  void removePreviousRTCStatusRight()
+  {
+    if (rtc_interface_right_.isRegistered(uuid_right_)) {
+      rtc_interface_right_.removeCooperateStatus(uuid_right_);
+    }
   }
 
   // data used in previous planning
@@ -188,7 +224,8 @@ private:
   void generateExtendedDrivableArea(ShiftedPath * shifted_path) const;
 
   // -- velocity planning --
-  void modifyPathVelocityToPreventAccelerationOnAvoidance(ShiftedPath & shifted_path) const;
+  std::shared_ptr<double> ego_velocity_starting_avoidance_ptr_;
+  void modifyPathVelocityToPreventAccelerationOnAvoidance(ShiftedPath & shifted_path);
 
   // clean up shifter
   void postProcess(PathShifter & shifter) const;
